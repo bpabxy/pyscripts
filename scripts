@@ -1,1 +1,207 @@
 
+        // Constants (replace with actual values as needed)
+        private static final String STAFFING_SECTION_NAME = "Staffings";
+        private static final String HEALTH_SAFETY_SECTION_NAME = "HealthSafetyRecords";
+        private static final String STAFFING_FULLY_EMPLOYED_STAFF_FIELD = "Fully Employed Staff";
+        private static final String HEALTH_SAFETY_ISO_45001_FIELD = "ISO 45001";
+        private static final String HEALTH_SAFETY_ISO_45001_EXPIRY_DATE_FIELD = "ExpiryDate";
+
+        public Map<String, Object> processData(JsonNode apiData, List<Mapping> mappingConfig) {
+            Map<String, Object> result = new HashMap<>();
+
+            // Group mappings by section code
+            Map<String, List<Mapping>> mappingsBySection = mappingConfig.stream()
+                    .collect(Collectors.groupingBy(Mapping::getSectionCode));
+
+            // Explicitly specify sections to treat as single (flat) or array
+            Set<String> singleSections = Set.of("TP", "INS"); // Treat TP and INS as flat sections
+
+            for (Map.Entry<String, List<Mapping>> entry : mappingsBySection.entrySet()) {
+                String sectionCode = entry.getKey();
+                List<Mapping> mappings = entry.getValue();
+
+                // Determine the section type and call the appropriate processing method
+                if (singleSections.contains(sectionCode)) {
+                    // Process as a flat single section (e.g., TP, INS)
+                    Map<String, String> sectionResult = processFlatSingleSection(apiData, mappings);
+                    System.out.println("Merging flat single-section result for section code: " + sectionCode);
+                    result.putAll(sectionResult); // Flatten TP and INS into result map directly
+                } else {
+                    // Process as an array section (e.g., ACC)
+                    List<Map<String, String>> sectionResult = processArraySection(apiData, mappings);
+                    // Always add the section code to the result map, even if sectionResult is empty
+                    result.put(sectionCode, sectionResult);
+                }
+            }
+
+            // Process custom data mappings based on API data
+            Map<String, String> customData = processCustomConstructionlineMappingDetails(apiData);
+            if (!customData.isEmpty()) {
+                result.putAll(customData);
+            }
+
+            System.out.println("Final result: " + result);
+            return result;
+        }
+
+        private Map<String, String> processFlatSingleSection(JsonNode apiData, List<Mapping> mappings) {
+            System.out.println("Starting processFlatSingleSection for mappings: " + mappings);
+            Map<String, String> result = new HashMap<>();
+
+            for (Mapping mapping : mappings) {
+                JsonNode valueNode;
+
+                System.out.println("Processing mapping: " + mapping.getExternalId());
+
+                if (mapping.getSectionCode().equals("INS")) {
+                    // Split the full path in externalId and navigate to Insurance
+                    String[] pathSegments = mapping.getExternalId().split("\\.");
+                    JsonNode insuranceArrayNode = traversePath(apiData, Arrays.copyOfRange(pathSegments, 0, 3));
+                    System.out.println("Retrieved insurance array node: " + insuranceArrayNode);
+
+                    if (insuranceArrayNode != null && insuranceArrayNode.isArray() && insuranceArrayNode.size() > 0) {
+                        // Access the first item in the Insurance array
+                        JsonNode firstInsuranceNode = insuranceArrayNode.get(0);
+                        System.out.println("First insurance node: " + firstInsuranceNode);
+
+                        // Retrieve the specific field within the first insurance node
+                        valueNode = traversePath(firstInsuranceNode, Arrays.copyOfRange(pathSegments, 3, pathSegments.length));
+                        System.out.println("Retrieved value for field " + mapping.getFieldName() + ": " + (valueNode != null ? valueNode.asText() : "null"));
+                    } else {
+                        System.out.println("Insurance array missing or empty at path: " + String.join(".", Arrays.copyOfRange(pathSegments, 0, 3)));
+                        valueNode = null;
+                    }
+                } else if (mapping.getExternalId().contains(".X.")) {
+                    // Existing handling for mappings with .X. (other array mappings)
+                    String[] splitPath = mapping.getExternalId().split("\\.X\\.");
+                    JsonNode arrayNode = traversePath(apiData, splitPath[0].split("\\."));
+
+                    if (arrayNode != null && arrayNode.isArray() && arrayNode.size() > 0) {
+                        System.out.println("Found array at path: " + splitPath[0] + " with size: " + arrayNode.size());
+                        valueNode = traversePath(arrayNode.get(0), splitPath[1].split("\\."));
+                        System.out.println("Retrieved value from array element: " + (valueNode != null ? valueNode.asText() : "null"));
+                    } else {
+                        System.out.println("Array node missing or empty for path: " + splitPath[0]);
+                        valueNode = null;
+                    }
+                } else {
+                    // Standard flat mapping for other sections
+                    valueNode = traversePath(apiData, mapping.getExternalId().split("\\."));
+                    System.out.println("Retrieved value for direct path: " + mapping.getExternalId() + " = " + (valueNode != null ? valueNode.asText() : "null"));
+                }
+
+                String qualifiedKey = mapping.getSectionCode() + "." + mapping.getFieldName();
+
+                // Always add the key to result, even if value is null or empty
+                String valueText = (valueNode != null) ? valueNode.asText() : "";
+                result.put(qualifiedKey, valueText);
+                System.out.println("Added to result with key: " + qualifiedKey + " = " + valueText);
+            }
+            System.out.println("Finished processFlatSingleSection with result: " + result);
+            return result;
+        }
+
+        private List<Map<String, String>> processArraySection(JsonNode apiData, List<Mapping> mappings) {
+            System.out.println("Starting processArraySection for mappings: " + mappings);
+            List<Map<String, String>> result = new ArrayList<>();
+
+            // Get the common array path from the first mapping
+            String arrayPath = mappings.get(0).getExternalId().split("\\.X\\.")[0];
+            JsonNode arrayNode = traversePath(apiData, arrayPath.split("\\."));
+
+            if (arrayNode != null && arrayNode.isArray()) {
+                for (JsonNode itemNode : arrayNode) {
+                    Map<String, String> itemMap = new HashMap<>();
+                    for (Mapping mapping : mappings) {
+                        String[] splitPath = mapping.getExternalId().split("\\.X\\.");
+                        if (splitPath.length < 2) {
+                            continue;
+                        }
+                        String[] itemPath = splitPath[1].split("\\.");
+                        JsonNode valueNode = traversePath(itemNode, itemPath);
+
+                        // Always add the field to itemMap, even if value is null or empty
+                        String valueText = (valueNode != null) ? valueNode.asText() : "";
+                        itemMap.put(mapping.getFieldName(), valueText);
+                    }
+                    // Always add itemMap to result, even if it's empty or has empty values
+                    result.add(itemMap);
+                }
+            } else {
+                System.out.println("Array node missing or empty for path: " + arrayPath);
+                // If arrayNode is null or empty, add an empty list to represent the section
+                // Depending on your requirements, you can choose to add an empty itemMap or leave the list empty
+                // For this code, we'll keep the list empty to represent no items
+            }
+            System.out.println("Finished processArraySection with result: " + result);
+            return result;
+        }
+
+        private Map<String, String> processCustomConstructionlineMappingDetails(JsonNode apiData) {
+            Map<String, String> customData = new HashMap<>();
+
+            // Process Staffings section
+            JsonNode staffingsNode = apiData.path("Staffings").path("Staffings");
+            if (staffingsNode != null && staffingsNode.isArray()) {
+                int fullyEmployedTotal = 0;
+                for (JsonNode staffing : staffingsNode) {
+                    String office = staffing.path("Office").asText();
+                    if (office.equals(STAFFING_FULLY_EMPLOYED_STAFF_FIELD)) {
+                        fullyEmployedTotal = staffing.path("Total").asInt();
+                        customData.put("CustomData.NumberOfEmployees", String.valueOf(fullyEmployedTotal));
+                        break;
+                    }
+                }
+                // If not found, set the value to empty string
+                customData.putIfAbsent("CustomData.NumberOfEmployees", "");
+            } else {
+                // If Staffings section is missing or not an array, set empty value
+                customData.put("CustomData.NumberOfEmployees", "");
+            }
+
+            // Process HealthSafetyRecords section
+            JsonNode healthSafetyRecordsNode = apiData.path("HealthSafetyRecords").path("HealthSafetyRecords");
+            if (healthSafetyRecordsNode != null && healthSafetyRecordsNode.isArray()) {
+                boolean found = false;
+                for (JsonNode healthSafetyRecord : healthSafetyRecordsNode) {
+                    String assessorsName = healthSafetyRecord.path("AssessorsName").asText();
+                    if (assessorsName.equals(HEALTH_SAFETY_ISO_45001_FIELD)) {
+                        String dateString = healthSafetyRecord.path(HEALTH_SAFETY_ISO_45001_EXPIRY_DATE_FIELD).asText();
+                        LocalDate date = LocalDate.parse(dateString);
+                        customData.put("CustomData.ISO45001", "Yes");
+                        customData.put("CustomData.ISO45001Expiry", date.toString());
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    // If not found, set values to empty strings
+                    customData.put("CustomData.ISO45001", "");
+                    customData.put("CustomData.ISO45001Expiry", "");
+                }
+            } else {
+                // If HealthSafetyRecords section is missing or not an array, set empty values
+                customData.put("CustomData.ISO45001", "");
+                customData.put("CustomData.ISO45001Expiry", "");
+            }
+
+            return customData;
+        }
+
+        private static JsonNode traversePath(JsonNode rootNode, String[] path) {
+            JsonNode currentNode = rootNode;
+            System.out.println("Starting traversePath for path: " + Arrays.toString(path));
+
+            for (String key : path) {
+                currentNode = currentNode.path(key);
+                if (currentNode.isMissingNode()) {
+                    System.out.println("Missing node at key: " + key);
+                    return null;
+                }
+            }
+            System.out.println("TraversePath completed. Final node: " + (currentNode != null ? currentNode.asText() : "null"));
+            return currentNode;
+        }
+
+
+
